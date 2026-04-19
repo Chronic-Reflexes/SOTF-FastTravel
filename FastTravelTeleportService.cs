@@ -2,18 +2,37 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using Sons.Gameplay;
+using TheForest.Utils;
 using UnityEngine;
 
 namespace FastTravel
 {
     public static class FastTravelTeleportService
     {
+        private const float TeleportCooldownSeconds = 60f;
+        private const float FoodDrainPercentPer100Meters = 8f;
+        private const float WaterDrainPercentPer100Meters = 5f;
+        private const float SleepDrainPercentPer100Meters = 3f;
+        private static float _nextTeleportAllowedAt;
+
+        public static bool TryGetCooldownRemaining(out float remainingSeconds)
+        {
+            remainingSeconds = Mathf.Max(0f, _nextTeleportAllowedAt - Time.unscaledTime);
+            return remainingSeconds > 0f;
+        }
+
         public static bool TryTeleportToBed(FastTravelBedLocation location, out string status)
         {
             status = "Teleport failed.";
             if (location == null)
             {
                 status = "No bed selected.";
+                return false;
+            }
+
+            if (TryGetCooldownRemaining(out _))
+            {
+                status = "Fast travel is cooling down.";
                 return false;
             }
 
@@ -32,15 +51,148 @@ namespace FastTravel
                 return false;
             }
 
+            Vector3 startPosition = playerTransform.position;
+
             if (!TryMovePlayer(playerTransform, safeSpot, rotation))
             {
                 status = "Could not move player.";
                 return false;
             }
 
+            _nextTeleportAllowedAt = Time.unscaledTime + TeleportCooldownSeconds;
+            ApplyDistanceBasedVitalsDrain(startPosition, safeSpot);
+
             status = "Teleported to " + location.DisplayName + ".";
             ModMain.LogMessage("FastTravel: Teleport success to " + safeSpot + ".");
             return true;
+        }
+
+        private static void ApplyDistanceBasedVitalsDrain(Vector3 fromPosition, Vector3 toPosition)
+        {
+            float travelDistanceMeters = Vector3.Distance(fromPosition, toPosition);
+            if (travelDistanceMeters <= 0.01f)
+                return;
+
+            if (!TryGetLocalVitals(out Vitals vitals))
+                return;
+
+            // Drain is fully proportional to exact travel distance, not quantized to 100m chunks.
+            float foodDrainFraction = CalculateDrainFraction(travelDistanceMeters, FoodDrainPercentPer100Meters);
+            float waterDrainFraction = CalculateDrainFraction(travelDistanceMeters, WaterDrainPercentPer100Meters);
+            float sleepDrainFraction = CalculateDrainFraction(travelDistanceMeters, SleepDrainPercentPer100Meters);
+
+            bool fullnessApplied = TryApplyFactorDrain(
+                vitals.GetFullnessFactor,
+                vitals.GetFullness,
+                vitals.SetFullness,
+                foodDrainFraction,
+                out float fullnessBefore,
+                out float fullnessAfter);
+
+            bool hydrationApplied = TryApplyFactorDrain(
+                vitals.GetHydrationFactor,
+                vitals.GetHydration,
+                vitals.SetHydration,
+                waterDrainFraction,
+                out float hydrationBefore,
+                out float hydrationAfter);
+
+            bool restApplied = TryApplyFactorDrain(
+                vitals.GetRestFactor,
+                vitals.GetRest,
+                vitals.SetRest,
+                sleepDrainFraction,
+                out float restBefore,
+                out float restAfter);
+
+            if (!fullnessApplied && !hydrationApplied && !restApplied)
+                return;
+
+            ModMain.LogMessage(
+                "FastTravel: Distance drain " + travelDistanceMeters.ToString("F1") + "m"
+                + " food=" + (foodDrainFraction * 100f).ToString("F2") + "%"
+                + " water=" + (waterDrainFraction * 100f).ToString("F2") + "%"
+                + " sleep=" + (sleepDrainFraction * 100f).ToString("F2") + "%"
+                + " factors F:" + fullnessBefore.ToString("F3") + "->" + fullnessAfter.ToString("F3")
+                + " W:" + hydrationBefore.ToString("F3") + "->" + hydrationAfter.ToString("F3")
+                + " S:" + restBefore.ToString("F3") + "->" + restAfter.ToString("F3") + ".");
+        }
+
+        private static float CalculateDrainFraction(float distanceMeters, float percentPer100Meters)
+        {
+            if (distanceMeters <= 0f || percentPer100Meters <= 0f)
+                return 0f;
+
+            return Mathf.Max(0f, distanceMeters * percentPer100Meters / 10000f);
+        }
+
+        private static bool TryGetLocalVitals(out Vitals vitals)
+        {
+            vitals = null;
+
+            try
+            {
+                vitals = LocalPlayer.Vitals;
+                return vitals != null;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool TryApplyFactorDrain(
+            Func<float> getFactor,
+            Func<float> getValue,
+            Action<float> setValue,
+            float drainFraction,
+            out float beforeFactor,
+            out float afterFactor)
+        {
+            beforeFactor = 0f;
+            afterFactor = 0f;
+
+            if (getFactor == null || getValue == null || setValue == null || drainFraction <= 0f)
+                return false;
+
+            try
+            {
+                beforeFactor = Sanitize01(getFactor());
+                afterFactor = Mathf.Clamp01(beforeFactor - drainFraction);
+
+                if (afterFactor >= beforeFactor)
+                    return true;
+
+                float currentValue = Mathf.Max(0f, getValue());
+                float estimatedMax = currentValue;
+
+                if (beforeFactor > 0.0001f)
+                    estimatedMax = currentValue / beforeFactor;
+
+                if (!IsFinite(estimatedMax) || estimatedMax <= 0f)
+                    estimatedMax = Mathf.Max(currentValue, 1f);
+
+                float targetValue = Mathf.Clamp(afterFactor * estimatedMax, 0f, estimatedMax);
+                setValue(targetValue);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static float Sanitize01(float value)
+        {
+            if (!IsFinite(value))
+                return 0f;
+
+            return Mathf.Clamp01(value);
+        }
+
+        private static bool IsFinite(float value)
+        {
+            return !float.IsNaN(value) && !float.IsInfinity(value);
         }
 
         private static Transform ResolveBedTransform(FastTravelBedLocation location)

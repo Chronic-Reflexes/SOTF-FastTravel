@@ -52,6 +52,7 @@ namespace FastTravel
         private const string ItemTemplateName = "ItemTemplatePickupGui";
         private const string CustomUiElementId = "custom.fasttravel";
         private static Texture2D _fastTravelArrowTexture;
+        private static Texture2D _fastTravelArrowDisabledTexture;
 
         [HarmonyPostfix]
         public static void Postfix(SleepInteract __instance)
@@ -251,7 +252,7 @@ namespace FastTravel
             primary.SetId(CustomUiElementId, true);
             primary.SetText("Fast Travel");
             primary.enabled = true;
-            ApplyArrowIcon(primary);
+            ApplyArrowIcon(primary, disabled: false);
             primary.gameObject.SetActive(false);
             primary.gameObject.SetActive(true);
 
@@ -306,14 +307,14 @@ namespace FastTravel
             return null;
         }
 
-        public static void ApplyArrowIcon(LinkUiElement link)
+        public static void ApplyArrowIcon(LinkUiElement link, bool disabled)
         {
             if (link == null)
                 return;
 
             try
             {
-                Texture2D arrow = GetOrCreateArrowTexture();
+                Texture2D arrow = GetOrCreateArrowTexture(disabled);
                 if (arrow == null)
                     return;
 
@@ -328,17 +329,27 @@ namespace FastTravel
             }
         }
 
-        private static Texture2D GetOrCreateArrowTexture()
+        private static Texture2D GetOrCreateArrowTexture(bool disabled)
         {
-            if (_fastTravelArrowTexture != null)
-                return _fastTravelArrowTexture;
+            if (disabled)
+            {
+                if (_fastTravelArrowDisabledTexture != null)
+                    return _fastTravelArrowDisabledTexture;
+            }
+            else
+            {
+                if (_fastTravelArrowTexture != null)
+                    return _fastTravelArrowTexture;
+            }
 
             const int size = 64;
-            var tex = new Texture2D(size, size, TextureFormat.RGBA32, false);
-            tex.name = "FastTravelArrowIcon";
-
             Color32 clear = new Color32(0, 0, 0, 0);
-            Color32 arrow = new Color32(230, 240, 255, 255);
+            Color32 arrow = disabled
+                ? new Color32(90, 90, 90, 115)
+                : new Color32(230, 240, 255, 255);
+
+            var tex = new Texture2D(size, size, TextureFormat.RGBA32, false);
+            tex.name = disabled ? "FastTravelArrowIconDisabled" : "FastTravelArrowIcon";
 
             for (int y = 0; y < size; y++)
             {
@@ -373,6 +384,13 @@ namespace FastTravel
             }
 
             tex.Apply(false, false);
+
+            if (disabled)
+            {
+                _fastTravelArrowDisabledTexture = tex;
+                return _fastTravelArrowDisabledTexture;
+            }
+
             _fastTravelArrowTexture = tex;
             return _fastTravelArrowTexture;
         }
@@ -618,6 +636,7 @@ namespace FastTravel
         public static void Postfix(SleepInteract __instance)
         {
             FastTravelLocationRegistry.MarkBedInactive(__instance);
+            SleepInteract_Update_Patch.ForgetSleepInteract(__instance.GetInstanceID());
             SleepInteract_Awake_Patch.HideFastTravelUiForSleepInteract(__instance);
         }
     }
@@ -629,6 +648,7 @@ namespace FastTravel
         public static void Postfix(SleepInteract __instance)
         {
             FastTravelLocationRegistry.RemoveBed(__instance);
+            SleepInteract_Update_Patch.ForgetSleepInteract(__instance.GetInstanceID());
         }
     }
 
@@ -638,10 +658,13 @@ namespace FastTravel
         private const string FastTravelElementName = "FastTravelInteractionElement";
         private const string ItemTemplateName = "ItemTemplatePickupGui";
         private const float FastTravelHoldDuration = 0.65f;
+        private const float ReinjectRetryIntervalSeconds = 1f;
+        private const float MinFastTravelUiHorizontalSeparationPx = 96f;
         private static readonly Dictionary<int, GameObject> _dedicatedUiByLinkId = new Dictionary<int, GameObject>();
         private static readonly Dictionary<int, LinkUiElement> _primaryLinkByRootId = new Dictionary<int, LinkUiElement>();
         private static readonly Dictionary<int, float> _holdStartBySleepInteractId = new Dictionary<int, float>();
         private static readonly HashSet<int> _holdTriggeredBySleepInteractId = new HashSet<int>();
+        private static readonly Dictionary<int, float> _lastReinjectAttemptBySleepInteractId = new Dictionary<int, float>();
         private static readonly Dictionary<int, Image[]> _progressImagesByUiId = new Dictionary<int, Image[]>();
         private static readonly HashSet<int> _configuredPromptUiIds = new HashSet<int>();
 
@@ -652,6 +675,8 @@ namespace FastTravel
             {
                 FastTravelLocationRegistry.TrackBed(__instance);
 
+                int sleepInteractId = __instance.GetInstanceID();
+
                 Transform sleepAndSave = __instance.transform;
                 if (sleepAndSave == null) return;
 
@@ -659,7 +684,28 @@ namespace FastTravel
                 if (itemTemplate == null) return;
 
                 Transform fastTravel = itemTemplate.Find(FastTravelElementName);
-                if (fastTravel == null) return;
+                if (fastTravel == null)
+                {
+                    bool shouldRetry = !_lastReinjectAttemptBySleepInteractId.TryGetValue(sleepInteractId, out float lastAttempt)
+                        || (Time.unscaledTime - lastAttempt) >= ReinjectRetryIntervalSeconds;
+
+                    if (shouldRetry)
+                    {
+                        _lastReinjectAttemptBySleepInteractId[sleepInteractId] = Time.unscaledTime;
+                        SleepInteract_Awake_Patch.Postfix(__instance);
+
+                        itemTemplate = sleepAndSave.Find(ItemTemplateName);
+                        fastTravel = itemTemplate != null ? itemTemplate.Find(FastTravelElementName) : null;
+
+                        if (fastTravel != null)
+                        {
+                            ModMain.LogMessage("FastTravel: Recreated missing interaction element for '" + __instance.name + "'.");
+                        }
+                    }
+
+                    if (fastTravel == null)
+                        return;
+                }
 
                 if (!fastTravel.gameObject.activeInHierarchy || !fastTravel.gameObject.activeSelf)
                 {
@@ -686,11 +732,18 @@ namespace FastTravel
             }
         }
 
+        internal static void ForgetSleepInteract(int sleepInteractId)
+        {
+            _holdStartBySleepInteractId.Remove(sleepInteractId);
+            _holdTriggeredBySleepInteractId.Remove(sleepInteractId);
+            _lastReinjectAttemptBySleepInteractId.Remove(sleepInteractId);
+        }
+
         private static void MirrorLinkUiDrawState(SleepInteract sleepInteract, Transform source, Transform fastTravel)
         {
             if (sleepInteract == null || source == null || fastTravel == null) return;
 
-            var sourceLink = GetCachedPrimaryLinkUi(source.gameObject);
+            var sourceLink = ResolveVisibleSourceLinkUi(source);
             if (sourceLink == null)
             {
                 HideDedicatedUiForFastTravel(fastTravel);
@@ -720,7 +773,7 @@ namespace FastTravel
                 fastUi = trackedUi;
             }
 
-            if (!sourceLink.IsActive || !sourceVisible)
+            if (!sourceVisible)
             {
                 HideDedicatedUiForFastTravel(fastTravel);
                 DeactivateTrackedUi(fastLinkId, fastUi);
@@ -751,8 +804,6 @@ namespace FastTravel
             if (fastUi == null)
                 return;
 
-            SleepInteract_Awake_Patch.ApplyArrowIcon(fastLink);
-
             if (!fastUi.activeSelf)
             {
                 fastUi.SetActive(true);
@@ -760,12 +811,12 @@ namespace FastTravel
 
             ConfigureCloneForFPrompt(fastUi);
 
-            HandleFastTravelFActivation(sleepInteract, sourceVisible, fastUi);
+            HandleFastTravelFActivation(sleepInteract, sourceVisible, fastLink, fastUi);
 
             // If this is our dedicated cloned ui object, keep it attached to source UI screen position.
             if (string.Equals(fastUi.name, "FastTravelUiElement", StringComparison.Ordinal))
             {
-                SyncClonedUiWithSource(sourceUi, fastUi, source.position, anchorPos);
+                SyncClonedUiWithSource(sourceUi, fastUi, sourceLink.transform.position, anchorPos);
                 return;
             }
 
@@ -778,7 +829,7 @@ namespace FastTravel
             fastLink.ManagedUpdate(anchor, anchorPos);
         }
 
-        private static void HandleFastTravelFActivation(SleepInteract sleepInteract, bool sourceVisible, GameObject fastUi)
+        private static void HandleFastTravelFActivation(SleepInteract sleepInteract, bool sourceVisible, LinkUiElement fastLink, GameObject fastUi)
         {
             if (sleepInteract == null)
                 return;
@@ -787,9 +838,22 @@ namespace FastTravel
 
             if (!sourceVisible || fastUi == null)
             {
+                SetFastTravelCooldownVisualState(fastLink, fastUi, false);
+                UpdateFastTravelLinkText(fastLink);
                 ResetHoldState(id, fastUi);
                 return;
             }
+
+            if (FastTravelTeleportService.TryGetCooldownRemaining(out float cooldownRemainingSeconds))
+            {
+                SetFastTravelCooldownVisualState(fastLink, fastUi, true);
+                UpdateFastTravelLinkText(fastLink);
+                ResetHoldState(id, fastUi);
+                return;
+            }
+
+            SetFastTravelCooldownVisualState(fastLink, fastUi, false);
+            UpdateFastTravelLinkText(fastLink);
 
             if (!Input.GetKey(KeyCode.F))
             {
@@ -836,6 +900,69 @@ namespace FastTravel
             _holdStartBySleepInteractId.Remove(sleepInteractId);
             _holdTriggeredBySleepInteractId.Remove(sleepInteractId);
             SetHoldProgressVisual(fastUi, 0f);
+        }
+
+        private static void UpdateFastTravelLinkText(LinkUiElement fastLink)
+        {
+            if (fastLink == null)
+                return;
+
+            try
+            {
+                fastLink.SetText("Fast Travel");
+            }
+            catch
+            {
+            }
+        }
+
+        private static void SetFastTravelCooldownVisualState(LinkUiElement fastLink, GameObject fastUi, bool disabled)
+        {
+            if (fastUi == null)
+                return;
+
+            try
+            {
+                SleepInteract_Awake_Patch.ApplyArrowIcon(fastLink, disabled);
+
+                var keyBase = fastUi.transform.Find("PrimaryPanel/ButtonPanel/KeyboardKeyBase");
+                SetUiBranchVisibleWithoutLayoutShift(keyBase, !disabled);
+
+                var buttonPanel = fastUi.transform.Find("PrimaryPanel/ButtonPanel");
+                if (buttonPanel != null)
+                {
+                    var dynamicIcons = buttonPanel.GetComponentsInChildren<DynamicInputIcon>(true);
+                    for (int i = 0; i < dynamicIcons.Length; i++)
+                    {
+                        var icon = dynamicIcons[i];
+                        if (icon == null)
+                            continue;
+
+                        SetUiBranchVisibleWithoutLayoutShift(icon.transform, !disabled);
+                    }
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        private static void SetUiBranchVisibleWithoutLayoutShift(Transform branch, bool visible)
+        {
+            if (branch == null)
+                return;
+
+            var go = branch.gameObject;
+            if (!go.activeSelf)
+                go.SetActive(true);
+
+            var group = go.GetComponent<CanvasGroup>();
+            if (group == null)
+                group = go.AddComponent<CanvasGroup>();
+
+            group.alpha = visible ? 1f : 0f;
+            group.interactable = false;
+            group.blocksRaycasts = false;
         }
 
         private static void SetHoldProgressVisual(GameObject fastUi, float progress)
@@ -973,6 +1100,62 @@ namespace FastTravel
             return resolved;
         }
 
+        private static LinkUiElement ResolveVisibleSourceLinkUi(Transform sourceRoot)
+        {
+            if (sourceRoot == null)
+                return null;
+
+            var links = sourceRoot.GetComponentsInChildren<LinkUiElement>(true);
+            if (links == null || links.Length == 0)
+                return null;
+
+            LinkUiElement firstEnabled = null;
+            LinkUiElement firstEnabledNonDisabled = null;
+            LinkUiElement firstVisibleDisabled = null;
+
+            for (int i = 0; i < links.Length; i++)
+            {
+                var link = links[i];
+                if (link == null)
+                    continue;
+
+                if (firstEnabled == null && link.enabled)
+                    firstEnabled = link;
+
+                if (firstEnabledNonDisabled == null && link.enabled && !IsDisabledSourceLinkUi(link, null))
+                    firstEnabledNonDisabled = link;
+
+                GameObject ui = null;
+                try
+                {
+                    ui = link.GetUiGameObject();
+                }
+                catch
+                {
+                }
+
+                if (IsUiVisible(ui))
+                {
+                    if (!IsDisabledSourceLinkUi(link, ui))
+                        return link;
+
+                    if (firstVisibleDisabled == null)
+                        firstVisibleDisabled = link;
+                }
+            }
+
+            if (firstVisibleDisabled != null)
+                return firstVisibleDisabled;
+
+            if (firstEnabledNonDisabled != null)
+                return firstEnabledNonDisabled;
+
+            if (firstEnabled != null)
+                return firstEnabled;
+
+            return SleepInteract_Awake_Patch.FindPrimaryLinkUiElement(sourceRoot.gameObject);
+        }
+
         private static bool IsUiVisible(GameObject ui)
         {
             if (ui == null)
@@ -982,6 +1165,32 @@ namespace FastTravel
                 return false;
 
             return true;
+        }
+
+        private static bool IsDisabledSourceLinkUi(LinkUiElement link, GameObject ui)
+        {
+            if (link != null && HasDisabledNameInHierarchy(link.transform))
+                return true;
+
+            if (ui != null && HasDisabledNameInHierarchy(ui.transform))
+                return true;
+
+            return false;
+        }
+
+        private static bool HasDisabledNameInHierarchy(Transform transform)
+        {
+            for (var current = transform; current != null; current = current.parent)
+            {
+                string name = current.name;
+                if (!string.IsNullOrEmpty(name)
+                    && name.IndexOf("Disabled", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private static void DeactivateTrackedUi(int linkId, GameObject fastUi)
@@ -1073,7 +1282,13 @@ namespace FastTravel
 
             // Fallback nudge to keep icons separated if projection is unavailable.
             if (offset.sqrMagnitude < 0.01f)
-                offset = new Vector3(-32f, 0f, 0f);
+                offset = new Vector3(MinFastTravelUiHorizontalSeparationPx, 0f, 0f);
+
+            // Keep Fast Travel prompt from collapsing into Save when Sleep is unavailable.
+            if (Mathf.Abs(offset.x) < MinFastTravelUiHorizontalSeparationPx)
+            {
+                offset.x = MinFastTravelUiHorizontalSeparationPx;
+            }
 
             fastUi.transform.position = sourceUi.transform.position + offset;
             fastUi.transform.rotation = sourceUi.transform.rotation;
@@ -1212,14 +1427,56 @@ namespace FastTravel
         private static Transform FindSyncTemplate(Transform itemTemplate)
         {
             var sleep = itemTemplate.Find("SleepInteractionElement");
-            if (sleep != null)
+            var save = itemTemplate.Find("SaveInteractionElement");
+
+            int sleepScore = ScoreTemplateForSync(sleep);
+            int saveScore = ScoreTemplateForSync(save);
+
+            if (saveScore > sleepScore)
+                return save;
+
+            if (sleepScore > int.MinValue)
                 return sleep;
 
-            var save = itemTemplate.Find("SaveInteractionElement");
-            if (save != null)
+            if (saveScore > int.MinValue)
                 return save;
 
             return null;
+        }
+
+        private static int ScoreTemplateForSync(Transform template)
+        {
+            if (template == null)
+                return int.MinValue;
+
+            int score = 0;
+            var go = template.gameObject;
+
+            if (go != null && go.activeInHierarchy && go.activeSelf)
+                score += 10;
+
+            var link = ResolveVisibleSourceLinkUi(template);
+            if (link == null)
+                return score;
+
+            GameObject ui = null;
+            try
+            {
+                ui = link.GetUiGameObject();
+            }
+            catch
+            {
+            }
+
+            if (IsUiVisible(ui))
+                score += 20;
+
+            if (!IsDisabledSourceLinkUi(link, ui))
+                score += 20;
+            else
+                score -= 20;
+
+            return score;
         }
     }
 }

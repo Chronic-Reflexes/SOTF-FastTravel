@@ -19,6 +19,7 @@ namespace FastTravel
         {
             _harmony = new HarmonyLib.Harmony("com.yourname.fasttravel.manual");
             _harmony.PatchAll(typeof(FastTravelMod).Assembly);
+            FastTravelNetworkingRuntime.Install();
             FastTravel.UI.FastTravelUI.Initialize();
 
             ModMain.LogMessage("FastTravel: Mod initialized.");

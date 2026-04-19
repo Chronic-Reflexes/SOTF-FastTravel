@@ -54,6 +54,7 @@ desktop.ini
 *.vsix
 *.nupkg
 *.userprefs
+logs/
 
 # NuGet
 packages/

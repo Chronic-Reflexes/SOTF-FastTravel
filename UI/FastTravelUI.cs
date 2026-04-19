@@ -82,23 +82,36 @@ namespace FastTravel.UI
         {
         }
 
+        private enum FastTravelTransitionPhase
+        {
+            None,
+            WaitingForClose,
+            FadeOut,
+            HoldBeforeFadeIn,
+            FadeIn
+        }
+
         private sealed class BedRowView
         {
             public int BedObjectId;
             public Image Background;
             public TextMeshProUGUI NameLabel;
             public TextMeshProUGUI DistanceLabel;
+            public Color BaseBackgroundColor;
+            public Color SelectedBackgroundColor;
         }
 
         private const float RefreshInterval = 0.35f;
         private const int NoSelection = int.MinValue;
 
         private GameObject _overlay;
+        private GameObject _travelFadeOverlay;
         private RectTransform _window;
         private RectTransform _listContent;
         private ScrollRect _scrollRect;
         private TextMeshProUGUI _emptyListLabel;
         private TextMeshProUGUI _statusLabel;
+        private Image _travelFadeImage;
 
         private Button _personalTabButton;
         private Button _publicTabButton;
@@ -107,6 +120,7 @@ namespace FastTravel.UI
         private Button _visibilityButton;
         private TextMeshProUGUI _personalTabLabel;
         private TextMeshProUGUI _publicTabLabel;
+        private TextMeshProUGUI _visibilityButtonLabel;
 
         private GameObject _renameModal;
         private TMP_InputField _renameInput;
@@ -122,6 +136,7 @@ namespace FastTravel.UI
         private CursorLockMode _previousCursorLockMode;
         private float _previousTimeScale = 1f;
         private bool _inputStateApplied;
+        private bool _pauseGameplayWhileUiOpen;
         private bool _pendingEscReleaseRestore;
         private float _pendingEscRestoreStartedAt;
         private bool _pendingPointerReleaseRestore;
@@ -142,8 +157,27 @@ namespace FastTravel.UI
         private const float PointerRestoreMinDelaySeconds = 0.05f;
         private const float PointerRestoreFailSafeSeconds = 0.2f;
         private const float RefreshRetryWhilePointerHeldSeconds = 0.05f;
+        private const float ForceRefreshWhilePointerHeldAfterSeconds = 1f;
         private const int PointerFinalizeStabilizeFrames = 2;
         private const int PostRestoreInputFlushFrames = 3;
+
+        private float _pointerHeldRefreshDeferredStartedAt = -1f;
+        private int _lastKnownLocationStateVersion = -1;
+        private int _pendingVisibilityBedObjectId = NoSelection;
+        private bool _pendingVisibilityTargetPublic;
+        private bool _suppressAutoSelectionOnNextRefresh;
+        private bool _isFastTravelTransitionActive;
+        private FastTravelTransitionPhase _fastTravelTransitionPhase;
+        private FastTravelBedLocation _pendingTravelLocation;
+        private float _fastTravelTransitionPhaseStartedAt;
+        private bool _transitionInputLockActive;
+        private bool _transitionInputPreviousCursorVisible;
+        private CursorLockMode _transitionInputPreviousCursorLockMode;
+
+        private const float FastTravelFadeOutSeconds = 2f;
+        private const float FastTravelFadeInSeconds = 2f;
+        private const float FastTravelFadeHoldSeconds = 6f;
+        private const float FastTravelCloseWaitTimeoutSeconds = 2f;
 
         public bool IsOpen
         {
@@ -164,6 +198,8 @@ namespace FastTravel.UI
                 Input.ResetInputAxes();
                 _postRestoreInputFlushFrames--;
             }
+
+            TickFastTravelTransition();
 
             if (_pendingPointerCloseRequest)
             {
@@ -237,6 +273,8 @@ namespace FastTravel.UI
             SetPauseMenuBlocked(true);
             EnforceUiInputState();
 
+            TryRefreshForRegistryStateChange();
+
             if (Input.GetKeyDown(KeyCode.Escape))
             {
                 CloseFromEscape();
@@ -245,13 +283,29 @@ namespace FastTravel.UI
 
             if (Time.unscaledTime >= _nextRefreshAt)
             {
-                if (IsAnyMouseButtonHeld())
+                bool pointerHeld = IsAnyMouseButtonHeld();
+                if (pointerHeld)
                 {
+                    if (_pointerHeldRefreshDeferredStartedAt < 0f)
+                        _pointerHeldRefreshDeferredStartedAt = Time.unscaledTime;
+
                     // Avoid rebuilding rows while pointer is held; button click is committed on mouse-up.
-                    _nextRefreshAt = Time.unscaledTime + RefreshRetryWhilePointerHeldSeconds;
+                    // Force a periodic refresh if held state appears to get stuck, so authoritative updates remain visible.
+                    bool forceRefresh = (Time.unscaledTime - _pointerHeldRefreshDeferredStartedAt) >= ForceRefreshWhilePointerHeldAfterSeconds;
+                    if (!forceRefresh)
+                    {
+                        _nextRefreshAt = Time.unscaledTime + RefreshRetryWhilePointerHeldSeconds;
+                    }
+                    else
+                    {
+                        RefreshList(keepSelection: true);
+                        _nextRefreshAt = Time.unscaledTime + RefreshInterval;
+                        _pointerHeldRefreshDeferredStartedAt = -1f;
+                    }
                 }
                 else
                 {
+                    _pointerHeldRefreshDeferredStartedAt = -1f;
                     RefreshList(keepSelection: true);
                     _nextRefreshAt = Time.unscaledTime + RefreshInterval;
                 }
@@ -278,6 +332,10 @@ namespace FastTravel.UI
             _pendingOverlayHide = false;
             _pendingPointerCloseRequest = false;
             _postRestoreInputFlushFrames = 0;
+            _pointerHeldRefreshDeferredStartedAt = -1f;
+            _pendingVisibilityBedObjectId = NoSelection;
+            _lastKnownLocationStateVersion = FastTravelLocationRegistry.GetStateVersion();
+            _suppressAutoSelectionOnNextRefresh = true;
             _overlay.SetActive(true);
             if (_window != null)
                 _window.gameObject.SetActive(true);
@@ -311,6 +369,7 @@ namespace FastTravel.UI
         private void CloseInternal(bool restoreImmediately, bool waitForEscRelease, bool waitForPointerRelease)
         {
             _isOpen = false;
+            _pendingVisibilityBedObjectId = NoSelection;
             if (_renameModal != null)
                 _renameModal.SetActive(false);
             if (_window != null)
@@ -323,6 +382,8 @@ namespace FastTravel.UI
                 _pendingPointerFinalizeRestore = false;
                 _pointerFinalizeFramesRemaining = 0;
                 _pendingPointerCloseRequest = false;
+                _pointerHeldRefreshDeferredStartedAt = -1f;
+                _lastKnownLocationStateVersion = FastTravelLocationRegistry.GetStateVersion();
 
                 if (_overlay != null)
                     _overlay.SetActive(false);
@@ -347,6 +408,7 @@ namespace FastTravel.UI
 
         private void OnDisable()
         {
+            CancelFastTravelTransition();
             _pendingEscReleaseRestore = false;
             _pendingPointerReleaseRestore = false;
             _pendingPointerFinalizeRestore = false;
@@ -354,6 +416,9 @@ namespace FastTravel.UI
             _pendingOverlayHide = false;
             _pendingPointerCloseRequest = false;
             _postRestoreInputFlushFrames = 0;
+            _pointerHeldRefreshDeferredStartedAt = -1f;
+            _pendingVisibilityBedObjectId = NoSelection;
+            _lastKnownLocationStateVersion = FastTravelLocationRegistry.GetStateVersion();
             if (_overlay != null)
                 _overlay.SetActive(false);
             RestoreUiInputState();
@@ -361,6 +426,7 @@ namespace FastTravel.UI
 
         private void OnDestroy()
         {
+            CancelFastTravelTransition();
             _pendingEscReleaseRestore = false;
             _pendingPointerReleaseRestore = false;
             _pendingPointerFinalizeRestore = false;
@@ -368,6 +434,9 @@ namespace FastTravel.UI
             _pendingOverlayHide = false;
             _pendingPointerCloseRequest = false;
             _postRestoreInputFlushFrames = 0;
+            _pointerHeldRefreshDeferredStartedAt = -1f;
+            _pendingVisibilityBedObjectId = NoSelection;
+            _lastKnownLocationStateVersion = FastTravelLocationRegistry.GetStateVersion();
             RestoreUiInputState();
         }
 
@@ -395,6 +464,8 @@ namespace FastTravel.UI
 
             var overlayImage = _overlay.GetComponent<Image>();
             overlayImage.color = new Color(0f, 0f, 0f, 0.6f);
+
+            BuildTravelFadeOverlay();
 
             _window = CreateRect("Window", overlayRect);
             _window.anchorMin = new Vector2(0.5f, 0.5f);
@@ -460,7 +531,7 @@ namespace FastTravel.UI
             SetRect(_renameButton.GetComponent<RectTransform>(), new Vector2(0.35f, 0.12f), new Vector2(0.62f, 0.2f));
             _renameButton.onClick.AddListener((Action)OnRenameClicked);
 
-            _visibilityButton = CreateButton(_window, "VisibilityButton", "Public/Private", out _);
+            _visibilityButton = CreateButton(_window, "VisibilityButton", "Make Public", out _visibilityButtonLabel);
             SetRect(_visibilityButton.GetComponent<RectTransform>(), new Vector2(0.66f, 0.12f), new Vector2(0.96f, 0.2f));
             _visibilityButton.onClick.AddListener((Action)OnVisibilityClicked);
 
@@ -472,6 +543,199 @@ namespace FastTravel.UI
             BuildRenameModal();
             RefreshActionButtons();
             RefreshTabVisuals();
+        }
+
+        private void BuildTravelFadeOverlay()
+        {
+            _travelFadeOverlay = new GameObject("FastTravelFadeOverlay");
+            _travelFadeOverlay.transform.SetParent(transform, false);
+            _travelFadeOverlay.AddComponent<RectTransform>();
+            _travelFadeOverlay.AddComponent<Canvas>();
+            _travelFadeOverlay.AddComponent<CanvasScaler>();
+            _travelFadeOverlay.AddComponent<GraphicRaycaster>();
+            _travelFadeOverlay.AddComponent<Image>();
+
+            var canvas = _travelFadeOverlay.GetComponent<Canvas>();
+            canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+            canvas.sortingOrder = 5100;
+
+            var scaler = _travelFadeOverlay.GetComponent<CanvasScaler>();
+            scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
+            scaler.referenceResolution = new Vector2(1920f, 1080f);
+            scaler.matchWidthOrHeight = 0.5f;
+
+            var rect = _travelFadeOverlay.GetComponent<RectTransform>();
+            StretchToParent(rect);
+
+            _travelFadeImage = _travelFadeOverlay.GetComponent<Image>();
+            _travelFadeImage.color = new Color(0f, 0f, 0f, 0f);
+            _travelFadeImage.raycastTarget = true;
+
+            _travelFadeOverlay.SetActive(false);
+        }
+
+        private void BeginFastTravelTransition(FastTravelBedLocation location)
+        {
+            if (location == null)
+                return;
+
+            CancelFastTravelTransition();
+            _pendingTravelLocation = location;
+            _isFastTravelTransitionActive = true;
+            StartFastTravelTransitionPhase(FastTravelTransitionPhase.WaitingForClose);
+            CloseFromPointerUiAction();
+        }
+
+        private void CancelFastTravelTransition()
+        {
+            _isFastTravelTransitionActive = false;
+            _fastTravelTransitionPhase = FastTravelTransitionPhase.None;
+            _pendingTravelLocation = null;
+            ReleaseTransitionInputLock();
+            SetTravelFadeOverlayVisible(false);
+
+            if (_travelFadeImage != null)
+                SetTravelFadeAlpha(0f);
+        }
+
+        private void StartFastTravelTransitionPhase(FastTravelTransitionPhase phase)
+        {
+            _fastTravelTransitionPhase = phase;
+            _fastTravelTransitionPhaseStartedAt = Time.unscaledTime;
+        }
+
+        private void TickFastTravelTransition()
+        {
+            if (!_isFastTravelTransitionActive)
+                return;
+
+            if (_transitionInputLockActive)
+                EnforceTransitionInputLockState();
+
+            switch (_fastTravelTransitionPhase)
+            {
+                case FastTravelTransitionPhase.WaitingForClose:
+                {
+                    bool closeComplete = !_isOpen
+                        && !_pendingPointerCloseRequest
+                        && !_pendingEscReleaseRestore
+                        && !_pendingPointerReleaseRestore
+                        && !_pendingPointerFinalizeRestore
+                        && !_inputStateApplied;
+
+                    bool waitTimedOut = (Time.unscaledTime - _fastTravelTransitionPhaseStartedAt) >= FastTravelCloseWaitTimeoutSeconds;
+                    if (!closeComplete && !waitTimedOut)
+                        return;
+
+                    AcquireTransitionInputLock();
+                    SetTravelFadeOverlayVisible(true);
+                    SetTravelFadeAlpha(0f);
+                    StartFastTravelTransitionPhase(FastTravelTransitionPhase.FadeOut);
+                    return;
+                }
+
+                case FastTravelTransitionPhase.FadeOut:
+                {
+                    float progress = FastTravelFadeOutSeconds <= 0f
+                        ? 1f
+                        : Mathf.Clamp01((Time.unscaledTime - _fastTravelTransitionPhaseStartedAt) / FastTravelFadeOutSeconds);
+
+                    SetTravelFadeAlpha(progress);
+                    if (progress < 1f)
+                        return;
+
+                    bool teleported = FastTravelTeleportService.TryTeleportToBed(_pendingTravelLocation, out string status);
+                    ModMain.LogMessage("FastTravel: Transition teleport result -> success=" + teleported + " status='" + status + "'.");
+
+                    StartFastTravelTransitionPhase(FastTravelTransitionPhase.HoldBeforeFadeIn);
+
+                    return;
+                }
+
+                case FastTravelTransitionPhase.HoldBeforeFadeIn:
+                {
+                    if ((Time.unscaledTime - _fastTravelTransitionPhaseStartedAt) < FastTravelFadeHoldSeconds)
+                        return;
+
+                    ReleaseTransitionInputLock();
+                    StartFastTravelTransitionPhase(FastTravelTransitionPhase.FadeIn);
+                    return;
+                }
+
+                case FastTravelTransitionPhase.FadeIn:
+                {
+                    float progress = FastTravelFadeInSeconds <= 0f
+                        ? 1f
+                        : Mathf.Clamp01((Time.unscaledTime - _fastTravelTransitionPhaseStartedAt) / FastTravelFadeInSeconds);
+
+                    SetTravelFadeAlpha(1f - progress);
+                    if (progress < 1f)
+                        return;
+
+                    CancelFastTravelTransition();
+                    return;
+                }
+            }
+        }
+
+        private void SetTravelFadeOverlayVisible(bool visible)
+        {
+            if (_travelFadeOverlay == null)
+                return;
+
+            _travelFadeOverlay.SetActive(visible);
+            if (visible)
+                _travelFadeOverlay.transform.SetAsLastSibling();
+        }
+
+        private void SetTravelFadeAlpha(float alpha)
+        {
+            if (_travelFadeImage == null)
+                return;
+
+            Color color = _travelFadeImage.color;
+            color.a = Mathf.Clamp01(alpha);
+            _travelFadeImage.color = color;
+        }
+
+        private void AcquireTransitionInputLock()
+        {
+            if (_transitionInputLockActive)
+                return;
+
+            _transitionInputPreviousCursorVisible = Cursor.visible;
+            _transitionInputPreviousCursorLockMode = Cursor.lockState;
+
+            SetPauseMenuBlocked(true);
+            TrySetMenuMode(true);
+            EnforceTransitionInputLockState();
+            Input.ResetInputAxes();
+
+            _transitionInputLockActive = true;
+        }
+
+        private static void EnforceTransitionInputLockState()
+        {
+            if (Cursor.visible)
+                Cursor.visible = false;
+
+            if (Cursor.lockState != CursorLockMode.Locked)
+                Cursor.lockState = CursorLockMode.Locked;
+        }
+
+        private void ReleaseTransitionInputLock()
+        {
+            if (!_transitionInputLockActive)
+                return;
+
+            TrySetMenuMode(false);
+            SetPauseMenuBlocked(false);
+
+            Cursor.visible = _transitionInputPreviousCursorVisible;
+            Cursor.lockState = _transitionInputPreviousCursorLockMode;
+
+            Input.ResetInputAxes();
+            _transitionInputLockActive = false;
         }
 
         private void BuildRenameModal()
@@ -517,7 +781,7 @@ namespace FastTravel.UI
         {
             _showPublicTab = false;
             RefreshTabVisuals();
-            SetStatus("Personal beds list.");
+            SetStatus("Private beds list.");
             RefreshList(keepSelection: true);
         }
 
@@ -525,12 +789,15 @@ namespace FastTravel.UI
         {
             _showPublicTab = true;
             RefreshTabVisuals();
-            SetStatus("Public beds are a future feature.");
+            SetStatus("Public beds list (server authoritative).");
             RefreshList(keepSelection: true);
         }
 
         private void OnFastTravelClicked()
         {
+            if (_isFastTravelTransitionActive)
+                return;
+
             if (_selectedBedObjectId == NoSelection)
                 return;
 
@@ -542,12 +809,14 @@ namespace FastTravel.UI
 
             if (FastTravelLocationRegistry.TryGetByBedObjectId(_selectedBedObjectId, out var location))
             {
-                bool teleported = FastTravelTeleportService.TryTeleportToBed(location, out var status);
-                SetStatus(status);
-                if (teleported)
+                if (FastTravelTeleportService.TryGetCooldownRemaining(out float remainingSeconds))
                 {
-                    CloseFromPointerUiAction();
+                    SetStatus("Fast travel is cooling down (" + Mathf.CeilToInt(remainingSeconds) + "s).");
+                    return;
                 }
+
+                SetStatus("Fast traveling...");
+                BeginFastTravelTransition(location);
             }
             else
             {
@@ -568,6 +837,12 @@ namespace FastTravel.UI
                 return;
             }
 
+            if (!CanRenameLocation(location))
+            {
+                SetStatus("This bed cannot be renamed.");
+                return;
+            }
+
             _renameInput.text = location.DisplayName;
             _renameModal.SetActive(true);
             _renameInput.ActivateInputField();
@@ -576,7 +851,47 @@ namespace FastTravel.UI
 
         private void OnVisibilityClicked()
         {
-            SetStatus("Public/Private is reserved for a future multiplayer version.");
+            if (_selectedBedObjectId == NoSelection)
+                return;
+
+            if (!FastTravelLocationRegistry.TryGetByBedObjectId(_selectedBedObjectId, out var selectedLocation))
+            {
+                SetStatus("Selected bed is no longer available.");
+                RefreshList(keepSelection: false);
+                return;
+            }
+
+            bool makePublic = !selectedLocation.IsPublic;
+            if (!FastTravelLocationRegistry.TrySetBedPublicStateByObjectId(_selectedBedObjectId, makePublic, out string failureReason))
+            {
+                SetStatus(string.IsNullOrEmpty(failureReason)
+                    ? "Could not change bed visibility."
+                    : failureReason);
+                RefreshActionButtons();
+                return;
+            }
+
+            bool changedLocally = false;
+            if (FastTravelLocationRegistry.TryGetByBedObjectId(_selectedBedObjectId, out var refreshedLocation))
+            {
+                changedLocally = refreshedLocation.IsPublic == makePublic;
+            }
+
+            if (changedLocally)
+            {
+                _pendingVisibilityBedObjectId = NoSelection;
+                SetStatus(makePublic
+                    ? "Bed is now public."
+                    : "Bed is now private.");
+            }
+            else
+            {
+                _pendingVisibilityBedObjectId = _selectedBedObjectId;
+                _pendingVisibilityTargetPublic = makePublic;
+                SetStatus("Visibility request sent. Waiting for server confirmation.");
+            }
+
+            RefreshList(keepSelection: false);
         }
 
         private void OnRenameApplyClicked()
@@ -587,7 +902,11 @@ namespace FastTravel.UI
                 return;
             }
 
-            bool renamed = FastTravelLocationRegistry.RenameBedByObjectId(_selectedBedObjectId, _renameInput.text);
+            bool isPersonalPublicAlias = false;
+            if (FastTravelLocationRegistry.TryGetByBedObjectId(_selectedBedObjectId, out var selectedLocation))
+                isPersonalPublicAlias = _showPublicTab && selectedLocation.IsPublic && !selectedLocation.IsOwnedByLocalPlayer;
+
+            bool renamed = FastTravelLocationRegistry.RenameBedByObjectId(_selectedBedObjectId, _renameInput.text, isPersonalPublicAlias);
             _renameModal.SetActive(false);
 
             if (!renamed)
@@ -597,13 +916,19 @@ namespace FastTravel.UI
                 return;
             }
 
-            SetStatus("Bed renamed.");
+            SetStatus(isPersonalPublicAlias
+                ? "Public bed alias saved (local only)."
+                : "Bed renamed.");
             RefreshList(keepSelection: true);
         }
 
         private void RefreshList(bool keepSelection)
         {
-            var locations = FastTravelLocationRegistry.GetSnapshot(includeInactive: true);
+            _lastKnownLocationStateVersion = FastTravelLocationRegistry.GetStateVersion();
+
+            var locations = _showPublicTab
+                ? FastTravelLocationRegistry.GetPublicSnapshot(includeInactive: true)
+                : FastTravelLocationRegistry.GetPrivateSnapshot(includeInactive: true);
 
             ClearRows();
 
@@ -612,13 +937,28 @@ namespace FastTravel.UI
                 _emptyListLabel.gameObject.SetActive(true);
                 _selectedBedObjectId = NoSelection;
                 RefreshActionButtons();
+                TryResolvePendingVisibilityConfirmationStatus();
                 return;
             }
 
             _emptyListLabel.gameObject.SetActive(false);
 
-            if (!keepSelection || !ContainsBed(locations, _selectedBedObjectId))
+            if (!keepSelection)
+            {
+                if (_suppressAutoSelectionOnNextRefresh)
+                {
+                    _selectedBedObjectId = NoSelection;
+                    _suppressAutoSelectionOnNextRefresh = false;
+                }
+                else
+                {
+                    _selectedBedObjectId = PickDefaultSelection(locations);
+                }
+            }
+            else if (_selectedBedObjectId != NoSelection && !ContainsBed(locations, _selectedBedObjectId))
+            {
                 _selectedBedObjectId = PickDefaultSelection(locations);
+            }
 
             FastTravelBedLocation currentLocation = null;
             FastTravelLocationRegistry.TryGetByBedObjectId(_currentBedObjectId, out currentLocation);
@@ -636,7 +976,14 @@ namespace FastTravel.UI
                 y -= 46f;
 
                 var rowImage = rowRect.gameObject.AddComponent<Image>();
-                rowImage.color = new Color(0.16f, 0.19f, 0.26f, 0.96f);
+                bool isPublicBed = location.IsPublic;
+                Color baseColor = isPublicBed
+                    ? new Color(0.12f, 0.45f, 0.5f, 0.96f)
+                    : new Color(0.28f, 0.28f, 0.3f, 0.96f);
+                Color selectedColor = isPublicBed
+                    ? new Color(0.2f, 0.68f, 0.74f, 0.98f)
+                    : new Color(0.43f, 0.43f, 0.46f, 0.98f);
+                rowImage.color = baseColor;
 
                 var rowButton = rowRect.gameObject.AddComponent<Button>();
                 var rowColors = rowButton.colors;
@@ -649,7 +996,8 @@ namespace FastTravel.UI
                 int selectedId = location.BedObjectId;
                 rowButton.onClick.AddListener((Action)(() => OnRowSelected(selectedId)));
 
-                var nameLabel = CreateText("Name", rowRect, location.DisplayName, 25, TextAlignmentOptions.Left);
+                string displayName = BuildRowDisplayName(location);
+                var nameLabel = CreateText("Name", rowRect, displayName, 25, TextAlignmentOptions.Left);
                 nameLabel.rectTransform.anchorMin = new Vector2(0.03f, 0.1f);
                 nameLabel.rectTransform.anchorMax = new Vector2(0.68f, 0.9f);
                 nameLabel.color = new Color(0.95f, 0.96f, 0.99f, 1f);
@@ -664,7 +1012,9 @@ namespace FastTravel.UI
                     BedObjectId = location.BedObjectId,
                     Background = rowImage,
                     NameLabel = nameLabel,
-                    DistanceLabel = distanceLabel
+                    DistanceLabel = distanceLabel,
+                    BaseBackgroundColor = baseColor,
+                    SelectedBackgroundColor = selectedColor
                 });
             }
 
@@ -673,6 +1023,7 @@ namespace FastTravel.UI
 
             RefreshRowSelectionVisuals();
             RefreshActionButtons();
+            TryResolvePendingVisibilityConfirmationStatus();
         }
 
         private void OnRowSelected(int bedObjectId)
@@ -695,8 +1046,8 @@ namespace FastTravel.UI
                 bool selected = row.BedObjectId == _selectedBedObjectId;
 
                 row.Background.color = selected
-                    ? new Color(0.26f, 0.34f, 0.53f, 0.98f)
-                    : new Color(0.16f, 0.19f, 0.26f, 0.96f);
+                    ? row.SelectedBackgroundColor
+                    : row.BaseBackgroundColor;
 
                 row.NameLabel.color = selected
                     ? new Color(1f, 1f, 1f, 1f)
@@ -712,8 +1063,34 @@ namespace FastTravel.UI
         {
             bool hasSelection = _selectedBedObjectId != NoSelection;
             _fastTravelButton.interactable = hasSelection;
-            _renameButton.interactable = hasSelection;
-            _visibilityButton.interactable = hasSelection;
+
+            bool canRename = false;
+            bool canToggleVisibility = false;
+            string visibilityButtonText = "Make Public";
+
+            if (hasSelection && FastTravelLocationRegistry.TryGetByBedObjectId(_selectedBedObjectId, out var selectedLocation))
+            {
+                canRename = CanRenameLocation(selectedLocation);
+                canToggleVisibility = selectedLocation.IsOwnedByLocalPlayer;
+                visibilityButtonText = selectedLocation.IsPublic ? "Make Private" : "Make Public";
+            }
+
+            _renameButton.interactable = canRename;
+            _visibilityButton.interactable = canToggleVisibility;
+
+            if (_visibilityButtonLabel != null)
+                _visibilityButtonLabel.text = visibilityButtonText;
+        }
+
+        private bool CanRenameLocation(FastTravelBedLocation location)
+        {
+            if (location == null)
+                return false;
+
+            if (location.IsOwnedByLocalPlayer)
+                return true;
+
+            return _showPublicTab && location.IsPublic;
         }
 
         private void RefreshTabVisuals()
@@ -750,6 +1127,24 @@ namespace FastTravel.UI
             float distance = Vector3.Distance(current.Position, candidate.Position);
             int rounded = Mathf.RoundToInt(distance);
             return "(" + rounded + "m away)";
+        }
+
+        private string BuildRowDisplayName(FastTravelBedLocation location)
+        {
+            if (location == null)
+                return string.Empty;
+
+            if (!_showPublicTab)
+                return location.DisplayName;
+
+            string owner = !string.IsNullOrEmpty(location.OwnerDisplayName)
+                ? location.OwnerDisplayName
+                : location.OwnerId;
+
+            if (string.IsNullOrEmpty(owner))
+                owner = "Unknown";
+
+            return location.DisplayName + " (" + owner + ")";
         }
 
         private static bool ContainsBed(List<FastTravelBedLocation> locations, int bedObjectId)
@@ -790,6 +1185,46 @@ namespace FastTravel.UI
             }
 
             _rows.Clear();
+        }
+
+        private void TryRefreshForRegistryStateChange()
+        {
+            int currentStateVersion = FastTravelLocationRegistry.GetStateVersion();
+            if (currentStateVersion == _lastKnownLocationStateVersion)
+                return;
+
+            _lastKnownLocationStateVersion = currentStateVersion;
+
+            if (IsAnyMouseButtonHeld())
+            {
+                if (_pointerHeldRefreshDeferredStartedAt < 0f)
+                    _pointerHeldRefreshDeferredStartedAt = Time.unscaledTime;
+
+                _nextRefreshAt = Time.unscaledTime + RefreshRetryWhilePointerHeldSeconds;
+                return;
+            }
+
+            _pointerHeldRefreshDeferredStartedAt = -1f;
+            RefreshList(keepSelection: true);
+            _nextRefreshAt = Time.unscaledTime + RefreshInterval;
+        }
+
+        private void TryResolvePendingVisibilityConfirmationStatus()
+        {
+            if (_pendingVisibilityBedObjectId == NoSelection)
+                return;
+
+            if (!FastTravelLocationRegistry.TryGetByBedObjectId(_pendingVisibilityBedObjectId, out var location))
+                return;
+
+            if (location.IsPublic != _pendingVisibilityTargetPublic)
+                return;
+
+            SetStatus(_pendingVisibilityTargetPublic
+                ? "Server confirmed: bed is now public."
+                : "Server confirmed: bed is now private.");
+
+            _pendingVisibilityBedObjectId = NoSelection;
         }
 
         private void SetStatus(string message)
@@ -916,21 +1351,31 @@ namespace FastTravel.UI
             _previousCursorVisible = Cursor.visible;
             _previousCursorLockMode = Cursor.lockState;
             _previousTimeScale = Time.timeScale;
+            _pauseGameplayWhileUiOpen = ShouldPauseGameplayForUi();
 
+            // Always enter menu mode while panel is open so look/move gameplay input is captured by UI.
             TrySetMenuMode(true);
+
             ForceCursorForMenu();
 
-            Time.timeScale = 0f;
+            if (_pauseGameplayWhileUiOpen)
+                Time.timeScale = 0f;
+            else if (Time.timeScale != _previousTimeScale)
+                Time.timeScale = _previousTimeScale;
+
             _inputStateApplied = true;
         }
 
         private void EnforceUiInputState()
         {
             TrySetMenuMode(true);
+
             ForceCursorForMenu();
 
-            if (Time.timeScale != 0f)
+            if (_pauseGameplayWhileUiOpen && Time.timeScale != 0f)
                 Time.timeScale = 0f;
+            else if (!_pauseGameplayWhileUiOpen && Time.timeScale != _previousTimeScale)
+                Time.timeScale = _previousTimeScale;
         }
 
         private void RestoreUiInputState()
@@ -939,17 +1384,23 @@ namespace FastTravel.UI
 
             if (!_inputStateApplied)
             {
+                _pauseGameplayWhileUiOpen = false;
                 HideOverlayIfPending();
                 return;
             }
 
             TrySetMenuMode(false);
-            Time.timeScale = _previousTimeScale;
+
+            if (_pauseGameplayWhileUiOpen)
+            {
+                Time.timeScale = _previousTimeScale;
+            }
 
             Cursor.visible = _previousCursorVisible;
             Cursor.lockState = _previousCursorLockMode;
 
             Input.ResetInputAxes();
+            _pauseGameplayWhileUiOpen = false;
             _inputStateApplied = false;
             _postRestoreInputFlushFrames = PostRestoreInputFlushFrames;
             HideOverlayIfPending();
@@ -1168,6 +1619,24 @@ namespace FastTravel.UI
                     ModMain.LogMessage("FastTravel: SonsTools.MenuMode failed: " + ex.Message);
                 }
             }
+        }
+
+        private static bool ShouldPauseGameplayForUi()
+        {
+            if (FastTravelNetworkingRuntime.TryGetRuntimeNetworkState(
+                out bool isMultiplayer,
+                out bool isServer,
+                out bool isClient,
+                out bool isDedicatedServer))
+            {
+                if (isDedicatedServer)
+                    return false;
+
+                if (isMultiplayer || isServer || isClient)
+                    return false;
+            }
+
+            return true;
         }
 
     }
