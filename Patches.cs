@@ -360,7 +360,7 @@ namespace FastTravel
             // Arrow head
             for (int x = 39; x <= 56; x++)
             {
-                int t = x - 39;
+                int t = 56 - x;
                 int minY = 31 - t;
                 int maxY = 32 + t;
                 if (minY < 10) minY = 10;
