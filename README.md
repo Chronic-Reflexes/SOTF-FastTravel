@@ -1,6 +1,6 @@
 # FastTravel Mod (RedLoader)
 
-This folder contains a rebuilt FastTravel RedLoader mod with the Harmony patch that injects a "Fast Travel" interaction on beds and changes the key prompt to `F`.
+A Fast Travel system implemented in Sons of the Forest
 
 Build instructions
 
@@ -25,8 +25,3 @@ Deployment
 
 - Copy `bin\Release\FastTravel.dll` to your mods folder for the game.
 - Launch the game and approach a bed — you should see a "Fast Travel [F]" interaction.
-
-Notes
-
-- This repo includes `ModMain.cs` (simple logger + mod class) and `Patches.cs` (Harmony postfix for `SleepInteract.Awake`).
-- If you need the other UI/teleport classes (`FastTravelUI`, `BedRegistry`, etc.), tell me and I will recreate them next.
