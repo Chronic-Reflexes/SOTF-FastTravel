@@ -1,0 +1,80 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <OutputType>Library</OutputType>
+    <AssemblyName>FastTravel</AssemblyName>
+    <RootNamespace>FastTravel</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Put required DLLs into the project 'libs' folder (or update HintPath) -->
+    <Reference Include="RedLoader">
+      <HintPath>libs\RedLoader.dll</HintPath>
+      <Private>True</Private>
+    </Reference>
+    <Reference Include="Assembly-CSharp">
+      <HintPath>libs\Assembly-CSharp.dll</HintPath>
+      <Private>True</Private>
+    </Reference>
+    <Reference Include="Sons.Gui">
+      <HintPath>libs\Sons.Gui.dll</HintPath>
+      <Private>True</Private>
+    </Reference>
+    <Reference Include="Sons">
+      <HintPath>libs\Sons.dll</HintPath>
+      <Private>True</Private>
+    </Reference>
+    <Reference Include="SonsSdk">
+      <HintPath>libs\SonsSdk.dll</HintPath>
+      <Private>True</Private>
+    </Reference>
+    <Reference Include="Sons.Gameplay.LevelProps">
+      <HintPath>libs\Sons.Gameplay.LevelProps.dll</HintPath>
+      <Private>True</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>libs\UnityEngine.CoreModule.dll</HintPath>
+      <Private>True</Private>
+    </Reference>
+    <Reference Include="UnityEngine.InputLegacyModule">
+      <HintPath>libs\UnityEngine.InputLegacyModule.dll</HintPath>
+      <Private>True</Private>
+    </Reference>
+    <Reference Include="UnityEngine.PhysicsModule">
+      <HintPath>libs\UnityEngine.PhysicsModule.dll</HintPath>
+      <Private>True</Private>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>libs\UnityEngine.dll</HintPath>
+      <Private>True</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UI">
+      <HintPath>libs\UnityEngine.UI.dll</HintPath>
+      <Private>True</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UIModule">
+      <HintPath>libs\UnityEngine.UIModule.dll</HintPath>
+      <Private>True</Private>
+    </Reference>
+    <Reference Include="Unity.TextMeshPro">
+      <HintPath>libs\Unity.TextMeshPro.dll</HintPath>
+      <Private>True</Private>
+    </Reference>
+    <Reference Include="Il2Cppmscorlib">
+      <HintPath>libs\Il2Cppmscorlib.dll</HintPath>
+      <Private>True</Private>
+    </Reference>
+    <Reference Include="Il2CppInterop.Runtime">
+      <HintPath>libs\Il2CppInterop.Runtime.dll</HintPath>
+      <Private>True</Private>
+    </Reference>
+    <Reference Include="TheForest.Modding">
+      <HintPath>libs\TheForest.Modding.dll</HintPath>
+      <Private>True</Private>
+    </Reference>
+    <!-- Harmony: include whichever assembly you have (0Harmony or HarmonyLib) -->
+    <Reference Include="0Harmony">
+      <HintPath>libs\0Harmony.dll</HintPath>
+      <Private>True</Private>
+    </Reference>
+  </ItemGroup>
+</Project>

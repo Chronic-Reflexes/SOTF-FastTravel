@@ -1,0 +1,66 @@
+# Build output
+bin/
+obj/
+*.exe
+*.dll
+*.pdb
+*.mdb
+*.cache
+*.ilk
+*.log
+*.vspscc
+*.vssscc
+*.user
+*.userosscache
+*.suo
+*.csproj.user
+*.sln.docstates
+*.sln.iml
+*.ide
+
+# IDE/editor folders
+.vs/
+.vscode/
+.idea/
+
+# Workspace files
+FastTravel.code-workspace
+
+# Libraries and external binaries
+libs/
+
+# Unity/Il2Cpp temp files (if present)
+Library/
+Temp/
+MemoryCaptures/
+Build/
+Builds/
+
+# Generated files
+*.tmp
+*.temp
+*.bak
+*.swp
+*.pidb
+*.svd
+*.obj
+*.cache
+*.DS_Store
+Thumbs.db
+desktop.ini
+
+# OS and tooling
+*.log
+*.vsix
+*.nupkg
+*.userprefs
+
+# NuGet
+packages/
+*.nupkg
+.nuget/
+
+# JetBrains Rider
+.idea/
+*.sln.iml
+*/.idea/
